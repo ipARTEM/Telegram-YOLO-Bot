@@ -1,6 +1,18 @@
+# --- Основное ---
+python-telegram-bot==20.8
 python-dotenv==1.0.1
-python-telegram-bot==21.0.1
-TerraYolo==0.0.33
-PyYAML==6.0.1
-matplotlib==3.8.3
-ipython==8.22.2
+
+# --- ML / CV ---
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0   # для YOLO (если используешь TerraYolo внутри)
+numpy>=1.24.0
+opencv-python>=4.7.0
+pillow>=9.5.0
+
+# --- Асинхронщина и утилиты ---
+aiohttp>=3.9.0
+tqdm>=4.65.0
+
+# --- TerraYolo (если стоит отдельно) ---
+TerraYolo @ git+https://github.com/<user>/TerraYolo.git

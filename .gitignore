@@ -1,0 +1,28 @@
+# Виртуальное окружение
+.venv/
+venv/
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Конфиденциальные данные
+.env
+
+# Логи
+*.log
+logs/
+*.out
+
+# YOLO результаты
+runs/
+yolov5/runs/
+images/
+
+# Весовые файлы моделей
+*.pt
+
+# Системные файлы
+.DS_Store
+Thumbs.db

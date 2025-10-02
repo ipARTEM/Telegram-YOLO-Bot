@@ -9,6 +9,9 @@ import asyncio
 from typing import Dict, List, Optional, Tuple
 from TerraYolo.TerraYolo import TerraYoloV5   # фреймворк TerraYolo
 
+from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault
+
+
 # === 0) ENV / TOKEN / YOLO ===================================================
 load_dotenv()
 TOKEN = os.environ.get("TOKEN")  # ВАЖНО !!!!!  токен бота
@@ -373,9 +376,42 @@ async def detection(update, context):
         for p in results:
             await update.message.reply_photo(p)
 
-# === 4) Точка входа ==========================================================
+
+
+
+# === Регистрация подсказок команд (меню /) ====================================
+async def _setup_commands(app):
+    # Команды для ЛИЧНЫХ чатов (полный список)
+    private_commands = [
+        BotCommand("start",  "Приветствие и инструкция"),
+        BotCommand("help",   "Помощь по командам и описание системы"),
+        BotCommand("objects","Выбор типов объектов (классы COCO)"),
+        BotCommand("mode",   "Показать текущий режим (fast/pro)"),
+        BotCommand("fast",   "Включить быстрый режим"),
+        BotCommand("pro",    "Включить тяжёлый режим (только админ)"),
+    ]
+    await app.bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+
+    # Команды для ГРУПП (обычно короче)
+    group_commands = [
+        BotCommand("start",  "Приветствие"),
+        BotCommand("help",   "Помощь по командам"),
+        BotCommand("objects","Выбор классов распознавания"),
+        BotCommand("mode",   "Показать режим"),
+    ]
+    await app.bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+
+    # Базовый дефолт (на всякий случай)
+    await app.bot.set_my_commands(private_commands, scope=BotCommandScopeDefault())
+
+
 def main():
-    application = Application.builder().token(TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .post_init(_setup_commands)   # <-- ВАЖНО: здесь, на builder
+        .build()
+    )
     print('Бот запущен...')
 
     # Команды
@@ -389,14 +425,15 @@ def main():
     # Инлайн-кнопки (callback)
     application.add_handler(CallbackQueryHandler(on_cls, pattern=r"^cls:"))
 
-    # Изображения: несжатые (документ image/*) + сжатые (photo)
+    # Медиа
     application.add_handler(MessageHandler(filters.Document.IMAGE, detection, block=False))
     application.add_handler(MessageHandler(filters.PHOTO, detection, block=False))
 
-    # На текст отвечаем справкой
-    application.add_handler(MessageHandler(filters.TEXT, help))
+    # Текст (лучше исключить команды, чтобы /help не ловился ещё и этим хендлером)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, help))
 
-    application.run_polling()  # остановка CTRL + C
+    application.run_polling()
+
 
 
 if __name__ == "__main__":

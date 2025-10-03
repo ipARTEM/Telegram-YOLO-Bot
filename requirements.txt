@@ -14,5 +14,4 @@ pillow>=9.5.0
 aiohttp>=3.9.0
 tqdm>=4.65.0
 
-# --- TerraYolo (если стоит отдельно) ---
-TerraYolo @ git+https://github.com/<user>/TerraYolo.git
+

@@ -12,9 +12,36 @@ from TerraYolo.TerraYolo import TerraYoloV5   # фреймворк TerraYolo
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault
 
 
+import logging  # логирование для стабильной диагностики
+from logging.handlers import RotatingFileHandler  # ротация логов, чтобы файл не рос бесконечно
+from telegram.error import NetworkError, TimedOut, RetryAfter  # типовые ошибки сети Telegram
+
+
 # === 0) ENV / TOKEN / YOLO ===================================================
 load_dotenv()
 TOKEN = os.environ.get("TOKEN")  # ВАЖНО !!!!!  токен бота
+
+
+# --- 0.1) LOGGING -------------------------------------------------------------  # раздел логирования
+logger = logging.getLogger(__name__)  # создаём логгер текущего модуля
+
+logging.basicConfig(  # базовая настройка логирования
+    level=logging.INFO,  # уровень логирования INFO
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",  # единый формат логов
+)  # конец basicConfig
+
+file_handler = RotatingFileHandler(  # файл-обработчик с ротацией
+    filename="model.log",  # пишем логи в model.log (как у тебя уже есть файл)
+    maxBytes=2 * 1024 * 1024,  # максимум 2 МБ на файл лога
+    backupCount=5,  # хранить до 5 резервных файлов
+    encoding="utf-8",  # кодировка UTF-8
+)  # конец RotatingFileHandler
+
+file_handler.setFormatter(  # задаём форматирование логов для файла
+    logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")  # формат логов
+)  # конец setFormatter
+
+logging.getLogger().addHandler(file_handler)  # добавляем запись логов в файл для root-логгера
 
 WORK_DIR = 'D:/UII/DataScience/16_OD/OD'
 os.makedirs(WORK_DIR, exist_ok=True)
@@ -237,7 +264,7 @@ detector = DetectionService(WORK_DIR, CACHE_DIR, yolov5, CACHE_MAX_ITEMS)
 # === 1) /start ===============================================================
 async def start(update, context):
     user = update.effective_user
-    welcome_text = f"👋 Привет, {user.first_name or user.username}!\nДобро пожаловать в YOLOv5 Bot 🚀\n\n"
+    welcome_text = f"👋 Привет, {user.first_name or user.username}!\nДобро пожаловать в Object Detection Bot 🚀\n\n"
     main_text = (
         "Пришлите фото для распознавания объектов.\n"
         "Чтобы выбрать тип объектов для фильтра — нажмите /objects\n"
@@ -280,13 +307,15 @@ async def help(update, context):
         "/mode – Показать ваш текущий режим (fast/pro)\n"
         "/fast – Включить быстрый режим (один прогон)\n"
         "/pro – Тяжёлый режим (грид по conf и IoU, *только админ*)\n\n"
-        "📸 Отправьте фото (как фото или документ) — бот выполнит распознавание YOLOv5.\n\n"
-        "⚙️ Модель: *YOLOv5x*. Настройки:\n"
+        "📸 Отправьте фото (как фото или документ) — бот выполнит распознавание объектов.\n\n"
+        "⚙️ Модель: *Распознавания*. Настройки:\n"
         " - conf-threshold (уверенность детекции)\n"
         " - IoU-threshold для NMS\n"
         " - Фильтрация по классам COCO\n\n"
         "💾 Встроен кеш результатов по хешу изображения и параметрам.\n"
         "🔒 Тяжёлые режимы доступны только администраторам."
+        "\n"
+        "✅🧑🏻‍💻 Больше информации вы можете найти на сайте ah8.ru.\n"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -405,6 +434,21 @@ async def _setup_commands(app):
     await app.bot.set_my_commands(private_commands, scope=BotCommandScopeDefault())
 
 
+async def error_handler(update, context) -> None:  # обработчик ошибок приложения
+    """Обработчик ошибок Telegram-бота, чтобы сетевые сбои (502/таймаут) не выглядели как падение."""  # описание
+    err: Exception = context.error  # берём исключение из контекста
+
+    if isinstance(err, RetryAfter):  # если Telegram просит подождать (лимиты)
+        logger.warning("Telegram RetryAfter: %s seconds", err.retry_after)  # пишем предупреждение в лог
+        return  # выходим без traceback
+
+    if isinstance(err, (NetworkError, TimedOut)):  # если сетевой сбой/таймаут/502
+        logger.warning("Network error while polling: %s", err)  # логируем кратко без traceback
+        return  # выходим без traceback
+
+    logger.exception("Unhandled exception in bot: %s", err)  # все остальные ошибки пишем с traceback
+
+
 def main():
     application = (
         Application.builder()
@@ -432,7 +476,12 @@ def main():
     # Текст (лучше исключить команды, чтобы /help не ловился ещё и этим хендлером)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, help))
 
-    application.run_polling()
+    application.add_error_handler(error_handler)  # регистрируем обработчик ошибок, чтобы 502 не спамил traceback
+
+    application.run_polling(  # запускаем polling
+        drop_pending_updates=True,  # не обрабатываем накопившиеся апдейты после долгого оффлайна
+        close_loop=False,  # не закрываем event loop принудительно (стабильнее на Windows)
+    )  # конец run_polling
 
 
 

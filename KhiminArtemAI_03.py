@@ -7,7 +7,10 @@ import shutil
 import hashlib
 import asyncio
 from typing import Dict, List, Optional, Tuple
-from TerraYolo.TerraYolo import TerraYoloV5   # фреймворк TerraYolo
+# from TerraYolo.TerraYolo import TerraYoloV5   # фреймворк TerraYolo
+
+import sys  # импортируем sys для добавления локальной папки yolov5 в пути Python
+from pathlib import Path  # импортируем Path для удобной работы с путями
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats, BotCommandScopeDefault
 
@@ -42,6 +45,89 @@ file_handler.setFormatter(  # задаём форматирование лого
 )  # конец setFormatter
 
 logging.getLogger().addHandler(file_handler)  # добавляем запись логов в файл для root-логгера
+
+logging.getLogger("httpx").setLevel(logging.WARNING)  # отключаем информационный шум httpx
+logging.getLogger("httpcore").setLevel(logging.WARNING)  # отключаем информационный шум httpcore
+
+# --- 0.2) Подключение локальной папки yolov5 ---------------------------------  # раздел подключения локального YOLOv5
+CURRENT_DIR = Path(__file__).resolve().parent  # получаем абсолютный путь к папке текущего файла
+YOLOV5_DIR = CURRENT_DIR / "yolov5"  # формируем путь к локальной папке yolov5
+
+if str(YOLOV5_DIR) not in sys.path:  # если путь к yolov5 ещё не добавлен в sys.path
+    sys.path.insert(0, str(YOLOV5_DIR))  # добавляем путь в начало sys.path для корректного импорта модулей yolov5
+
+# from detect import run as yolov5_detect_run  # импортируем функцию run из локального yolov5/detect.py
+
+
+class TerraYoloV5:
+    """Локальный адаптер вместо внешнего TerraYoloV5 для совместимости с текущей логикой проекта."""  # описание класса
+
+    def __init__(self, work_dir: str) -> None:
+        self.work_dir = work_dir  # сохраняем рабочую директорию проекта
+
+    def run(self, test_dict: dict, mode: str = "test") -> None:
+        """Запускает локальный yolov5/detect.py через совместимый интерфейс test_dict."""  # описание метода
+        weights = test_dict.get("weights", "yolov5x.pt")  # получаем путь к весам модели
+        source = test_dict.get("source")  # получаем путь к источнику изображений
+        name = test_dict.get("name", "exp")  # получаем имя папки результата
+        conf_thres = float(test_dict.get("conf-thres", 0.25))  # получаем confidence threshold
+        iou_thres = float(test_dict.get("iou-thres", 0.45))  # получаем IoU threshold
+        classes_raw = test_dict.get("classes")  # получаем строку или список классов
+
+        if classes_raw is None:  # если классы не указаны
+            classes = None  # передаём None, чтобы детектить все классы
+        elif isinstance(classes_raw, str):  # если классы пришли строкой вида "0 1 2"
+            classes = [int(item) for item in classes_raw.split() if item.strip()]  # преобразуем строку в список целых индексов
+        elif isinstance(classes_raw, (list, tuple, set)):  # если классы уже в виде коллекции
+            classes = [int(item) for item in classes_raw]  # приводим все значения к int
+        else:  # если тип неожиданный
+            classes = None  # безопасно сбрасываем фильтр классов
+
+        weights_path = Path(self.work_dir) / weights  # формируем абсолютный путь к весам модели внутри проекта
+        project_path = Path(self.work_dir) / "yolov5" / "runs" / "detect"  # формируем путь к папке результатов detect
+
+        logger.info(  # пишем в лог факт запуска YOLOv5
+            "Запуск локального yolov5: weights=%s, source=%s, name=%s, conf=%.3f, iou=%.3f, classes=%s",
+            weights_path,
+            source,
+            name,
+            conf_thres,
+            iou_thres,
+            classes,
+        )  # конец logger.info
+
+        yolov5_detect_run(  # запускаем локальный детект напрямую через функцию run из detect.py
+            weights=str(weights_path),  # передаём путь к весам модели
+            source=str(source),  # передаём путь к папке с изображениями
+            data=str(YOLOV5_DIR / "data" / "coco128.yaml"),  # передаём yaml с описанием датасета COCO
+            imgsz=(640, 640),  # задаём размер изображения для инференса
+            conf_thres=conf_thres,  # передаём confidence threshold
+            iou_thres=iou_thres,  # передаём IoU threshold
+            max_det=1000,  # оставляем лимит на количество детекций
+            device="",  # используем доступное устройство автоматически
+            view_img=False,  # не показываем окно OpenCV
+            save_txt=False,  # не сохраняем txt-разметку
+            save_csv=False,  # не сохраняем csv
+            save_conf=False,  # не сохраняем confidence в txt
+            save_crop=False,  # не сохраняем кропы
+            nosave=False,  # сохраняем результирующие изображения
+            classes=classes,  # передаём фильтр классов
+            agnostic_nms=False,  # не включаем class-agnostic NMS
+            augment=False,  # не включаем augmented inference
+            visualize=False,  # не сохраняем feature maps
+            update=False,  # не обновляем веса
+            project=str(project_path),  # указываем папку, куда сохранять результаты
+            name=str(name),  # указываем имя конкретной подпапки запуска
+            exist_ok=True,  # разрешаем использовать уже существующую папку после её очистки снаружи
+            line_thickness=3,  # толщина рамки вокруг объекта
+            hide_labels=False,  # показываем названия классов
+            hide_conf=False,  # показываем confidence
+            half=False,  # не включаем fp16 по умолчанию
+            dnn=False,  # не используем OpenCV DNN backend
+            vid_stride=1,  # для изображений не влияет, оставляем 1
+        )  # конец вызова yolov5_detect_run
+
+
 
 WORK_DIR = 'D:/UII/DataScience/16_OD/OD'
 os.makedirs(WORK_DIR, exist_ok=True)
@@ -480,7 +566,7 @@ def main():
 
     application.run_polling(  # запускаем polling
         drop_pending_updates=True,  # не обрабатываем накопившиеся апдейты после долгого оффлайна
-        close_loop=False,  # не закрываем event loop принудительно (стабильнее на Windows)
+        # close_loop=False,  # не закрываем event loop принудительно (стабильнее на Windows)
     )  # конец run_polling
 
 

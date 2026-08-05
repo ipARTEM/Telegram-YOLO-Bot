@@ -9,6 +9,9 @@ import asyncio
 from typing import Dict, List, Optional, Tuple
 # from TerraYolo.TerraYolo import TerraYoloV5   # фреймворк TerraYolo
 
+import time  # пауза между повторными попытками запуска
+from telegram.request import HTTPXRequest  # объект HTTP-запросов Telegram с настраиваемыми тайм-аутами
+
 import sys  # импортируем sys для добавления локальной папки yolov5 в пути Python
 from pathlib import Path  # импортируем Path для удобной работы с путями
 
@@ -19,11 +22,18 @@ import logging  # логирование для стабильной диагн�
 from logging.handlers import RotatingFileHandler  # ротация логов, чтобы файл не рос бесконечно
 from telegram.error import NetworkError, TimedOut, RetryAfter  # типовые ошибки сети Telegram
 
+import contextlib  # нужен для безопасного подавления ошибок при остановке приложения
+
+
+if os.name == "nt":  # если запуск идёт на Windows
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # ставим более совместимую policy для event loop на Windows
+
 
 # === 0) ENV / TOKEN / YOLO ===================================================
 load_dotenv()
 TOKEN = os.environ.get("TOKEN")  # ВАЖНО !!!!!  токен бота
 
+print("TOKEN_LOADED:", bool(TOKEN), "TOKEN_PREFIX:", TOKEN[:10] if TOKEN else None)
 
 # --- 0.1) LOGGING -------------------------------------------------------------  # раздел логирования
 logger = logging.getLogger(__name__)  # создаём логгер текущего модуля
@@ -64,6 +74,15 @@ class TerraYoloV5:
 
     def __init__(self, work_dir: str) -> None:
         self.work_dir = work_dir  # сохраняем рабочую директорию проекта
+        self._yolov5_detect_run = None  # ссылка на функцию detect.run, загружаем лениво только при первом использовании
+
+    def _get_detect_run(self):
+        """Лениво импортирует detect.run из локальной папки yolov5 только при первом запуске детекции."""  # описание метода
+        if self._yolov5_detect_run is None:  # если функция ещё не импортирована
+            logger.info("Импортирую yolov5.detect.run впервые...")  # пишем в лог первый импорт
+            from detect import run as yolov5_detect_run  # лениво импортируем функцию run из detect.py
+            self._yolov5_detect_run = yolov5_detect_run  # сохраняем ссылку на функцию в атрибут объекта
+        return self._yolov5_detect_run  # возвращаем импортированную функцию
 
     def run(self, test_dict: dict, mode: str = "test") -> None:
         """Запускает локальный yolov5/detect.py через совместимый интерфейс test_dict."""  # описание метода
@@ -95,6 +114,8 @@ class TerraYoloV5:
             iou_thres,
             classes,
         )  # конец logger.info
+
+        yolov5_detect_run = self._get_detect_run()  # получаем функцию detect.run только в момент реального запуска
 
         yolov5_detect_run(  # запускаем локальный детект напрямую через функцию run из detect.py
             weights=str(weights_path),  # передаём путь к весам модели
@@ -535,39 +556,87 @@ async def error_handler(update, context) -> None:  # обработчик оши
     logger.exception("Unhandled exception in bot: %s", err)  # все остальные ошибки пишем с traceback
 
 
-def main():
-    application = (
-        Application.builder()
-        .token(TOKEN)
-        .post_init(_setup_commands)   # <-- ВАЖНО: здесь, на builder
-        .build()
-    )
-    print('Бот запущен...')
+async def run_bot() -> None:
+    """Асинхронный запуск Telegram-бота без run_polling, чтобы обойти сбой start_polling на Windows."""  # описание функции
+    request = HTTPXRequest(  # создаём объект HTTP-запросов с увеличенными тайм-аутами
+        connect_timeout=30.0,  # тайм-аут на установку соединения
+        read_timeout=30.0,  # тайм-аут на чтение ответа
+        write_timeout=30.0,  # тайм-аут на отправку данных
+        pool_timeout=30.0,  # тайм-аут ожидания соединения из пула
+    )  # конец HTTPXRequest
 
-    # Команды
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("objects", objects))
-    application.add_handler(CommandHandler("help", help))
-    application.add_handler(CommandHandler("mode", show_mode))
-    application.add_handler(CommandHandler("fast", set_fast))
-    application.add_handler(CommandHandler("pro", set_pro))
+    get_updates_request = HTTPXRequest(  # отдельный объект запросов для polling/getUpdates
+        connect_timeout=30.0,  # тайм-аут на установку соединения для polling
+        read_timeout=90.0,  # long polling ждёт дольше
+        write_timeout=30.0,  # тайм-аут на отправку polling-запроса
+        pool_timeout=30.0,  # тайм-аут ожидания соединения из пула
+    )  # конец HTTPXRequest для getUpdates
 
-    # Инлайн-кнопки (callback)
-    application.add_handler(CallbackQueryHandler(on_cls, pattern=r"^cls:"))
+    application = (  # создаём приложение Telegram
+        Application.builder()  # создаём builder приложения
+        .token(TOKEN)  # передаём токен бота
+        .request(request)  # передаём объект обычных HTTP-запросов
+        .get_updates_request(get_updates_request)  # передаём объект запросов для polling
+        .post_init(_setup_commands)  # регистрируем команды после инициализации
+        .build()  # собираем объект приложения
+    )  # конец создания application
 
-    # Медиа
-    application.add_handler(MessageHandler(filters.Document.IMAGE, detection, block=False))
-    application.add_handler(MessageHandler(filters.PHOTO, detection, block=False))
+    application.add_handler(CommandHandler("start", start))  # регистрируем команду /start
+    application.add_handler(CommandHandler("objects", objects))  # регистрируем команду /objects
+    application.add_handler(CommandHandler("help", help))  # регистрируем команду /help
+    application.add_handler(CommandHandler("mode", show_mode))  # регистрируем команду /mode
+    application.add_handler(CommandHandler("fast", set_fast))  # регистрируем команду /fast
+    application.add_handler(CommandHandler("pro", set_pro))  # регистрируем команду /pro
 
-    # Текст (лучше исключить команды, чтобы /help не ловился ещё и этим хендлером)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, help))
+    application.add_handler(CallbackQueryHandler(on_cls, pattern=r"^cls:"))  # регистрируем обработчик inline-кнопок
 
-    application.add_error_handler(error_handler)  # регистрируем обработчик ошибок, чтобы 502 не спамил traceback
+    application.add_handler(MessageHandler(filters.Document.IMAGE, detection, block=False))  # регистрируем обработку изображений-документов
+    application.add_handler(MessageHandler(filters.PHOTO, detection, block=False))  # регистрируем обработку фотографий
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, help))  # регистрируем ответ на обычный текст
 
-    application.run_polling(  # запускаем polling
-        drop_pending_updates=True,  # не обрабатываем накопившиеся апдейты после долгого оффлайна
-        # close_loop=False,  # не закрываем event loop принудительно (стабильнее на Windows)
-    )  # конец run_polling
+    application.add_error_handler(error_handler)  # регистрируем обработчик ошибок приложения
+
+    logger.info("Инициализация приложения...")  # пишем лог инициализации
+    await application.initialize()  # инициализируем приложение
+    await application.start()  # запускаем приложение
+    await application.updater.start_polling(drop_pending_updates=True)  # запускаем polling напрямую без run_polling
+
+    logger.info("Polling успешно запущен.")  # пишем лог успешного запуска
+    print("Polling успешно запущен.")  # выводим в консоль подтверждение запуска
+
+    try:
+        while True:  # держим приложение живым
+            await asyncio.sleep(1)  # спим по 1 секунде в бесконечном цикле
+    finally:
+        logger.info("Остановка polling...")  # пишем лог остановки
+        with contextlib.suppress(Exception):  # безопасно подавляем ошибки при остановке updater
+            await application.updater.stop()  # останавливаем polling
+        with contextlib.suppress(Exception):  # безопасно подавляем ошибки при остановке application
+            await application.stop()  # останавливаем приложение
+        with contextlib.suppress(Exception):  # безопасно подавляем ошибки при shutdown
+            await application.shutdown()  # завершаем приложение
+
+
+def main() -> None:
+    """Синхронная обёртка запуска с повторными попытками при сетевых сбоях."""  # описание функции
+    print("MAIN_VERSION_RETRY_03")  # маркер актуальной версии main
+    logger.info("MAIN_VERSION_RETRY_03")  # пишем маркер в лог
+
+    while True:  # бесконечный цикл перезапуска при временных сетевых ошибках
+        try:
+            print("Бот запущен...")  # выводим сообщение о запуске
+            logger.info("Бот запущен...")  # пишем лог запуска
+            asyncio.run(run_bot())  # запускаем асинхронный lifecycle бота
+            break  # если run_bot завершился штатно, выходим
+
+        except (TimedOut, NetworkError) as e:  # ловим сетевые ошибки Telegram API
+            logger.warning("Сетевая ошибка при запуске бота: %s", e)  # пишем предупреждение в лог
+            print(f"Сетевая ошибка при запуске бота: {e}. Повтор через 15 секунд...")  # выводим сообщение в консоль
+            time.sleep(15)  # ждём 15 секунд и пробуем снова
+
+        except Exception as e:  # ловим прочие неожиданные ошибки
+            logger.exception("Критическая ошибка запуска бота: %s", e)  # пишем полную ошибку в лог
+            raise  # пробрасываем ошибку дальше
 
 
 
